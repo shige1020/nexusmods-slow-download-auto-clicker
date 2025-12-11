@@ -22,6 +22,13 @@
   // デバッグログのオン/オフ
   const DEBUG = true;
 
+  // ダウンロード開始後にタブを自動で閉じるかどうか（将来的にオプションから切り替える想定）
+  const AUTO_CLOSE_TAB = true;
+
+  // 自動クローズまでの待ち時間 (ms)
+  // NexusMods のカウントダウン(5秒) + 少し余裕 → 10秒をデフォルトにしています。
+  const AUTO_CLOSE_DELAY_MS = 10000;
+
   // ポーリング間隔 (ms)
   const POLL_INTERVAL_MS = 500;
 
@@ -38,20 +45,11 @@
   // 共通ユーティリティ
   // ==============================
 
-  /**
-   * デバッグログ出力用ラッパー
-   * DEBUG が false の場合は何も出さない。
-   */
   function debugLog(...args) {
     if (!DEBUG) return;
-    // prefix を付けておくとコンソールで見つけやすい
     console.log("[NexusMods SlowDL]", ...args);
   }
 
-  /**
-   * 要素を視覚的にマークして「ここだよ」と分かるようにする。
-   * 主にデバッグ用途。
-   */
   function markElement(el) {
     if (!el) return;
     try {
@@ -65,19 +63,9 @@
 
   // ==============================
   // パターン1: 通常 DOM にボタンがあるケース
-  // （next.nexusmods.com 等）
   // ==============================
 
-  /**
-   * 通常の DOM 上にある「Slow download」ボタンを探して返す。
-   * 見つからなければ null。
-   *
-   * 注意:
-   *   - shadow DOM 内はこの方法では見えない。
-   *   - 文字列は "Slow download" を含むかどうかで判定。
-   */
   function findVisibleSlowDownloadButton() {
-    // button と、ボタン的に使われる a[role="button"] を候補にする
     const candidates = document.querySelectorAll("button, a[role='button']");
 
     debugLog(
@@ -90,11 +78,8 @@
       const text = rawText.trim().toLowerCase();
 
       if (!text) continue;
-
-      // "slow download" を含むものを対象にする
       if (!text.includes("slow download")) continue;
 
-      // disabled なボタンはスキップ
       if (el.disabled) {
         debugLog("Found Slow download button but it is disabled:", el);
         continue;
@@ -113,10 +98,6 @@
     return null;
   }
 
-  /**
-   * 通常 DOM 上の「Slow download」ボタンをクリックする。
-   * 成功すれば true、見つからなければ false。
-   */
   function triggerViaVisibleButton() {
     const btn = findVisibleSlowDownloadButton();
     if (!btn) return false;
@@ -128,15 +109,8 @@
 
   // ==============================
   // パターン2: Web Components 経由の slowDownload イベント
-  // （www.nexusmods.com の download ページ等）
   // ==============================
 
-  /**
-   * mod-file-download コンポーネントに slowDownload イベントを dispatch して
-   * 「Slow download ボタンが押された」のと同じ挙動を発生させる。
-   *
-   * 成功すれば true、要素が見つからなければ false。
-   */
   function triggerViaModFileDownloadComponent() {
     const modComponent = document.querySelector("mod-file-download");
     if (!modComponent) {
@@ -144,34 +118,139 @@
       return false;
     }
 
-    debugLog("mod-file-download component found. Dispatching slowDownload event.", modComponent);
+    debugLog(
+      "mod-file-download component found. Dispatching slowDownload event.",
+      modComponent
+    );
 
-    // ページ側では modComponent.addEventListener('slowDownload', ...) のように
-    // リスナーが設定されているので、それを起動する。
     const event = new CustomEvent("slowDownload", {
       bubbles: true,
       cancelable: true,
-      composed: true // shadow DOM を跨いで伝播させたい場合に有効
+      composed: true
     });
 
     const dispatchResult = modComponent.dispatchEvent(event);
-    debugLog("slowDownload event dispatched. defaultPrevented:", !dispatchResult);
+    debugLog(
+      "slowDownload event dispatched. defaultPrevented:",
+      !dispatchResult
+    );
 
     return true;
+  }
+
+  // ==============================
+  // 自動タブクローズ関連
+  // ==============================
+
+  /**
+   * 現在のタブを閉じる。
+   *
+   * 優先順位:
+   *   1. ページコンテキストで window.close() を実行する <script> を注入（Chrome/Firefox 共通）
+   *   2. 任意で background + tabs.remove を使ったフォールバック（browser/chrome 両対応）
+   */
+  function requestCloseCurrentTab() {
+    debugLog("[AutoClose] Trying to close tab via injected window.close().");
+
+    // 1) ページコンテキストで window.close() を実行する <script> を注入
+    try {
+      const script = document.createElement("script");
+      script.textContent =
+        "try { window.close(); } catch (e) { console && console.log('[NexusMods SlowDL][page] window.close() failed:', e); }";
+      (document.documentElement || document.head || document.body).appendChild(
+        script
+      );
+      script.remove();
+      debugLog(
+        "[AutoClose] Injected window.close() script into page context (Chrome/Firefox)."
+      );
+    } catch (e) {
+      debugLog("[AutoClose] Failed to inject window.close() script:", e);
+    }
+
+    // 2) background + tabs.remove を使ったフォールバック（任意）
+    const runtime =
+      (typeof browser !== "undefined" && browser.runtime) ||
+      (typeof chrome !== "undefined" && chrome.runtime)
+        ? (typeof browser !== "undefined" ? browser.runtime : chrome.runtime)
+        : null;
+
+    if (!runtime) {
+      debugLog(
+        "[AutoClose] No runtime API available (browser/chrome). Skipping message-based close."
+      );
+      return;
+    }
+
+    try {
+      const message = { type: "NEXUS_SLOWDL_CLOSE_TAB" };
+      debugLog(
+        "[AutoClose] Also sending close-tab request via runtime.sendMessage."
+      );
+
+      const send = runtime.sendMessage.bind(runtime);
+      const maybePromise = send(message, (response) => {
+        debugLog(
+          "[AutoClose] runtime.sendMessage callback response:",
+          response
+        );
+      });
+
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise
+          .then((response) => {
+            debugLog(
+              "[AutoClose] runtime.sendMessage promise response:",
+              response
+            );
+          })
+          .catch((err) => {
+            debugLog(
+              "[AutoClose] runtime.sendMessage promise error:",
+              err
+            );
+          });
+      }
+    } catch (e) {
+      debugLog("[AutoClose] Error while sending runtime message:", e);
+    }
+  }
+
+  /**
+   * Slow download を起動したあと、必要ならタブの自動クローズをスケジュールする。
+   *
+   * 条件:
+   * - AUTO_CLOSE_TAB が true
+   * - window.history.length <= 1（ブラウザバックできないタブ）
+   */
+  function scheduleAutoCloseIfNeeded() {
+    if (!AUTO_CLOSE_TAB) {
+      debugLog("[AutoClose] Disabled by AUTO_CLOSE_TAB flag.");
+      return;
+    }
+
+    if (window.history.length > 1) {
+      debugLog(
+        "[AutoClose] history.length > 1, will NOT auto-close this tab. history.length =",
+        window.history.length
+      );
+      return;
+    }
+
+    debugLog(
+      `[AutoClose] Auto-close scheduled in ${AUTO_CLOSE_DELAY_MS}ms (history.length=${window.history.length}).`
+    );
+
+    setTimeout(() => {
+      debugLog("[AutoClose] Auto-close timer fired. Closing tab now.");
+      requestCloseCurrentTab();
+    }, AUTO_CLOSE_DELAY_MS);
   }
 
   // ==============================
   // メインのトリガー処理
   // ==============================
 
-  /**
-   * 1 回の試行で「Slow download」を起動しようとする。
-   *
-   * 1. 通常 DOM にボタンがあるならそれをクリック。
-   * 2. なければ、mod-file-download コンポーネントに slowDownload を dispatch。
-   *
-   * どちらかが成功すれば alreadyTriggered を true にして終了。
-   */
   function tryTriggerOnce() {
     if (alreadyTriggered) {
       debugLog("Already triggered. Skipping this attempt.");
@@ -181,27 +260,25 @@
     attempts += 1;
     debugLog(`Attempt #${attempts} on ${location.href}`);
 
-    // 1. 画面に見えているボタンを探してクリックする
     if (triggerViaVisibleButton()) {
       debugLog("Triggered via visible button.");
       alreadyTriggered = true;
+      scheduleAutoCloseIfNeeded();
       return;
     }
 
-    // 2. Web Component (mod-file-download) に slowDownload を投げる
     if (triggerViaModFileDownloadComponent()) {
       debugLog("Triggered via mod-file-download component.");
       alreadyTriggered = true;
+      scheduleAutoCloseIfNeeded();
       return;
     }
 
-    debugLog("No visible button or mod-file-download component found in this attempt.");
+    debugLog(
+      "No visible button or mod-file-download component found in this attempt."
+    );
   }
 
-  /**
-   * ポーリングで複数回 tryTriggerOnce を呼び出す。
-   * - DOM の構築が遅れている場合や、SPA 的に後から要素が追加される場合に対応する。
-   */
   function startPolling() {
     debugLog(
       "Starting polling for Slow download trigger.",
@@ -228,12 +305,6 @@
     }, POLL_INTERVAL_MS);
   }
 
-  /**
-   * DOM の変化を監視し、新しいノードが追加されたタイミングでも
-   * 1 回だけ tryTriggerOnce を呼ぶ。
-   *
-   * ポーリングとは別系統の「保険」として動作する。
-   */
   function setupMutationObserver() {
     if (!("MutationObserver" in window)) {
       debugLog("MutationObserver is not available in this environment.");
@@ -243,7 +314,6 @@
     const observer = new MutationObserver((mutations) => {
       if (alreadyTriggered) return;
 
-      // 追加ノードがある変化だけを見る簡易フィルタ
       const hasAddedNodes = mutations.some(
         (m) => m.addedNodes && m.addedNodes.length > 0
       );
@@ -277,23 +347,29 @@
       document.readyState
     );
 
-    // ドキュメントの状態に応じて開始タイミングを変える
-    if (document.readyState === "complete" || document.readyState === "interactive") {
-      // すでに DOM はほぼ準備済み
-      debugLog("Document is already loaded or interactive. Starting immediately.");
+    if (
+      document.readyState === "complete" ||
+      document.readyState === "interactive"
+    ) {
+      debugLog(
+        "Document is already loaded or interactive. Starting immediately."
+      );
       startPolling();
       setupMutationObserver();
+      // 自動クローズは「トリガー成功時」に scheduleAutoCloseIfNeeded() から開始
     } else {
-      // まだ loading の場合
-      debugLog("Document is still loading. Waiting for DOMContentLoaded.");
+      debugLog(
+        "Document is still loading. Waiting for DOMContentLoaded."
+      );
       document.addEventListener("DOMContentLoaded", () => {
-        debugLog("DOMContentLoaded fired. Starting polling and observer.");
+        debugLog(
+          "DOMContentLoaded fired. Starting polling and observer."
+        );
         startPolling();
         setupMutationObserver();
       });
     }
   }
 
-  // エントリーポイント呼び出し
   start();
 })();

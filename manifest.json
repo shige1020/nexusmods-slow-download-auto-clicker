@@ -1,8 +1,17 @@
 {
   "manifest_version": 3,
   "name": "NexusMods Slow Download Auto Clicker",
-  "version": "1.0.0",
-  "description": "Automatically triggers the Slow download action on NexusMods mod file pages.",
+  "version": "1.1.0",
+  "description": "Automatically triggers the Slow download actio...ds mod file pages and optionally auto-closes the download tab.",
+
+  "permissions": [
+    "tabs"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
   "content_scripts": [
     {
       "matches": [
