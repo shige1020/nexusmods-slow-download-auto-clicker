@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "NexusMods Slow Download Auto Clicker",
   "version": "1.0.0",
-  "description": "Automatically clicks the \"Slow download\" button on NexusMods to simplify free downloads. NexusMods の「Slow download」ボタンを自動クリックして、無料ダウンロード操作を簡略化します。",
+  "description": "Automatically triggers the Slow download action on NexusMods mod file pages.",
   "content_scripts": [
     {
       "matches": [
@@ -10,7 +10,8 @@
         "*://next.nexusmods.com/*/mods/*?tab=files*"
       ],
       "js": ["content-script.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }
